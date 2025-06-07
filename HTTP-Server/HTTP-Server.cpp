@@ -2,6 +2,7 @@
 #include <winsock2.h>
 #include <thread>
 #include <map>
+#include <string>
 #include <vector>
 
 #pragma comment(lib, "Ws2_32.lib")
@@ -14,13 +15,32 @@ typedef struct HTTPRequest {
     std::string body;
 } HTTPRequest;
 
+typedef struct HTTPResponse {
+    std::string statusCode;
+    std::string statusMsg;
+    std::map < std::string, std::string > headers;
+    std::string body;
+} HTTPResponse;
+
+typedef struct Route {
+    std::string method;
+    std::string path;
+    int (*f)(const HTTPRequest&,HTTPResponse&);
+}Route;
+
 int createSocket(SOCKET& serverSocket);
 
 int bindServer(SOCKET& serverSocket, int port = 8081);
 
-int handelConnection(SOCKET& serverSocket,SOCKET clientSocket,sockaddr_in addr, int addrlen);
+int handelConnection(const SOCKET& serverSocket, SOCKET clientSocket, sockaddr_in addr, int addrlen, const std::vector<Route>& routes);
+
+void routeRequest(const HTTPRequest& request, HTTPResponse& response, const std::vector<Route>& routes);
 
 void parseRequest(std::string rawr, HTTPRequest& request);
+
+void createRoutes(std::vector<Route>& routes);
+
+std::string parseResponse(const HTTPResponse& response);
 
 std::string trimString(std::string s);
 
@@ -40,11 +60,14 @@ int main() {
 
     std::cout << "Server listening on port 8081..." << std::endl;
 
+    std::vector<Route> routes;
+    createRoutes(routes);
+
     while (true) {
         sockaddr_in clientAddr;
         int clientSize = sizeof(clientAddr);
         SOCKET clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientSize);
-        std::thread(handelConnection, std::ref(serverSocket), clientSocket, clientAddr, clientSize).detach();
+        std::thread(handelConnection, std::ref(serverSocket), clientSocket, clientAddr, clientSize, std::ref(routes)).detach();
     }
 
     closesocket(serverSocket);
@@ -90,7 +113,7 @@ int bindServer(SOCKET& serverSocket, int port) {
     return 0;
 }
 
-int handelConnection(SOCKET& serverSocket,SOCKET clientSocket, sockaddr_in addr, int addrlen)
+int handelConnection(const SOCKET& serverSocket,SOCKET clientSocket, sockaddr_in addr, int addrlen, const std::vector<Route>& routes)
 {
     if (clientSocket == INVALID_SOCKET) {
         std::cerr << "Accept failed: " << WSAGetLastError() << std::endl;
@@ -118,6 +141,10 @@ int handelConnection(SOCKET& serverSocket,SOCKET clientSocket, sockaddr_in addr,
 
                 parseRequest(std::string(buffer, bytesReceived), request);
 
+                HTTPResponse response;
+
+                routeRequest(request, response, routes);
+
                 std::cout << "Method: " << request.method << std::endl;
                 std::cout << "Path: " << request.path << std::endl;
                 std::cout << "Body: " << request.body << std::endl;
@@ -131,12 +158,7 @@ int handelConnection(SOCKET& serverSocket,SOCKET clientSocket, sockaddr_in addr,
                     std::cout << "K: " << pair.first << " , V: " << pair.second << std::endl;
                 }
 
-                std::string httpResponse =
-                    "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: text/plain\r\n"
-                    "Content-Length: 13\r\n"
-                    "\r\n"
-                    "Hello, world!";
+                std::string httpResponse = parseResponse(response);
 
                 send(clientSocket, httpResponse.c_str(), httpResponse.size(), 0);
             }
@@ -197,6 +219,55 @@ void parseRequest(std::string rawr, HTTPRequest& request) {
     }
 
     request.body = trimString(rawr);
+}
+
+std::string parseResponse(const HTTPResponse& response) {
+    std::string parsed = "HTTP/1.1 " + response.statusCode + " " + response.statusMsg + "\r\n";
+    for (const auto& pair : response.headers) {
+        parsed += pair.first + ": " + pair.second + "\r\n";
+    }
+    parsed += "\r\n" + response.body;
+    return parsed;
+}
+
+int f_hello(const HTTPRequest& request, HTTPResponse& response) {
+    response.body = "HELLO WORLD!!!!!!";
+    response.headers["Content-Type"] = "text/plain";
+    response.headers["Content-Length"] = std::to_string(response.body.length());
+    response.headers["Connection"] = "keep-alive";
+    response.statusCode = "200";
+    response.statusMsg = "OK";
+    return 1;
+}
+
+int f_not_found(HTTPResponse& response) {
+    response.body = "Route Not Found";
+    response.headers["Content-Type"] = "text/plain";
+    response.headers["Content-Length"] = std::to_string(response.body.length());
+    response.headers["Connection"] = "keep-alive";
+    response.statusCode = "400";
+    response.statusMsg = "Not Found";
+    return 1;
+}
+
+void createRoutes(std::vector<Route>& routes) {
+    Route hello;
+    hello.method = "GET";
+    hello.path = "/hello";
+    hello.f = f_hello;
+    routes.push_back(hello);
+}
+
+void routeRequest(const HTTPRequest& request, HTTPResponse& response, const std::vector<Route>& routes)
+{
+    for (const auto& route : routes) {
+        if (request.method == route.method && request.path == route.path) {
+            route.f(request, response);
+            return;
+        }
+    }
+    f_not_found(response);
+
 }
 
 std::string trimString(std::string s) {
